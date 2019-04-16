@@ -15,6 +15,10 @@
 
 #include <sl/Core.hpp>
 
+#include <opencv2/core.hpp>
+#include <opencv2/core/cuda.hpp>
+#include <opencv2/imgcodecs.hpp>
+
 struct CudaDeleter {
     template <typename T>
     void operator()(T *ptr) noexcept {
@@ -200,20 +204,6 @@ T to_host(const std::unique_ptr<T, CudaDeleter> &ptr) {
     return host;
 }
 
-__global__ void transform(const Transform &tf, sl::float4 *to_transform, std::size_t n) {
-    const std::size_t i = threadIdx.x + blockIdx.x * blockDim.x;
-
-    if (i < n) {
-        sl::float4 &elem = to_transform[i];
-        const Vector input = {elem[0], elem[1], elem[2]};
-        const Vector transformed = tf(input);
-
-        elem[0] = transformed[0];
-        elem[1] = transformed[1];
-        elem[2] = transformed[2];
-    }
-}
-
 constexpr std::size_t div_to_inf(std::size_t x, std::size_t y) noexcept {
     const std::size_t res = x / y;
 
@@ -224,93 +214,46 @@ constexpr std::size_t div_to_inf(std::size_t x, std::size_t y) noexcept {
     return res;
 }
 
-class Rgba {
-public:
-    Rgba() noexcept = default;
+__host__ __device__ sl::uchar4 from_packed(float x) {
+    union Converter {
+        float scalar;
+        sl::uchar4 vector;
+    };
 
-    __host__ __device__ Rgba(std::uint8_t r, std::uint8_t g,
-                             std::uint8_t b, std::uint8_t a) noexcept
-    : data_{r, g, b, a} { }
+    return Converter{x}.vector;
+}
 
-    static Rgba from_packed(float packed) noexcept {
-        union Caster {
-            float packed;
-            Rgba unpacked;
-        };
+__host__ __device__ float pack(sl::uchar4 x) noexcept {
+    union Converter {
+        sl::uchar4 vector;
+        float scalar;
+    };
 
-        return Caster{packed}.unpacked;
-    }
-
-    float to_packed() const noexcept {
-        union Caster {
-            Rgba unpacked;
-            float packed;
-        };
-
-        return Caster{*this}.packed;
-    }
-
-    __host__ __device__ std::uint8_t& r() noexcept {
-        return data_[0];
-    }
-
-    __host__ __device__ const std::uint8_t& r() const noexcept {
-        return data_[0];
-    }
-
-    __host__ __device__ std::uint8_t& g() noexcept {
-        return data_[1];
-    }
-
-    __host__ __device__ const std::uint8_t& g() const noexcept {
-        return data_[1];
-    }
-
-    __host__ __device__ std::uint8_t& b() noexcept {
-        return data_[2];
-    }
-
-    __host__ __device__ const std::uint8_t& b() const noexcept {
-        return data_[2];
-    }
-
-    __host__ __device__ std::uint8_t& a() noexcept {
-        return data_[3];
-    }
-
-    __host__ __device__ const std::uint8_t& a() const noexcept {
-        return data_[3];
-    }
-
-    __host__ __device__ std::uint8_t& operator[](std::size_t idx) noexcept {
-        assert(idx < 4);
-
-        return data_[idx];
-    }
-
-    __host__ __device__ const std::uint8_t& operator[](std::size_t idx) const noexcept {
-        assert(idx < 4);
-
-        return data_[idx];
-    }
-
-private:
-    alignas(float) std::uint8_t data_[4];
-};
+    return Converter{x}.scalar;
+}
 
 sl::Mat random_xyzrgba(std::size_t width, std::size_t height) {
     const std::size_t numel = width * height;
     sl::Mat m(width, height, sl::MAT_TYPE_32F_C4);
 
     const auto gen_ptr = std::make_unique<std::mt19937>();
-    std::uniform_real_distribution<float> dist(-10, 10);
+    std::uniform_real_distribution<float> pos_dist(-10, 10);
+    std::uniform_int_distribution<std::uint8_t> color_dist;
+
+    const auto gen_pos = [&gen_ptr, &pos_dist] {
+        return pos_dist(*gen_ptr);
+    };
+
+    const auto gen_col = [&gen_ptr, &color_dist] {
+        return color_dist(*gen_ptr);
+    };
 
     const auto arr = m.getPtr<sl::float4>();
     for (std::size_t i = 0; i < numel; ++i) {
-        arr[i][0] = dist(*gen_ptr);
-        arr[i][1] = dist(*gen_ptr);
-        arr[i][2] = dist(*gen_ptr);
-        arr[i][3] = Rgba(127, 127, 127, 255).to_packed();
+        arr[i][0] = gen_pos();
+        arr[i][1] = gen_pos();
+        arr[i][2] = gen_pos();
+        arr[i][3] = pack({255, 255, 255, 127});
     }
 
     m.updateGPUfromCPU();
@@ -318,39 +261,120 @@ sl::Mat random_xyzrgba(std::size_t width, std::size_t height) {
     return m;
 }
 
+__host__ __device__ std::uint32_t pack_bgra(
+    std::uint8_t b, std::uint8_t g,
+    std::uint8_t r, std::uint8_t a
+)  noexcept {
+    union Converter {
+        std::uint8_t arr[4];
+        std::uint32_t scalar;
+    };
+
+    return Converter{{b, g, r, a}}.scalar;
+}
+
+/**
+ *  @param input Points to an array of length n. Each element must be
+ *               a 4-tuple (X, Y, Z, RGBA) corresponding to a depth
+ *               map. The RGBA component is packed into a 32-bit float,
+ *               with each element being an 8-bit unsigned integer.
+ *  @param output Points to a matrix with m rows and p columns. Each
+ *                element must be a 4-tuple (B, G, R, A). The elements
+ *                should be stored contiguously in row-major order.
+ *  @param resolution The resolution (in meters) of each pixel in
+ *                    output, such that each pixel represents a
+ *                    (resolution x resolution) square.
+ *  @param x_offset The offset (in meters) between the center of the
+ *                  matrix and its leftmost edge, such that the pixel
+ *                  at (0, 0) is located in free space at (-x_offset,
+ *                  -y_offset).
+ *  @param y_offset The offset (in meters) between the center of the
+ *                  matrix and its topmost edge, such that the pixel
+ *                  at (0, 0) is located in free space at (-x_offset,
+ *                  -y_offset).
+ */
+__global__ void transform(const Transform &tf, const sl::float4 *input, std::uint32_t n,
+                          std::uint32_t *output, std::uint32_t m, std::uint32_t p,
+                          float resolution, float x_offset, float y_offset) {
+    const std::uint32_t pixel_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+    if (pixel_idx >= n) {
+        return;
+    }
+
+    const sl::float4 &elem = input[pixel_idx];
+    const Vector transformed = tf({elem[0], elem[1], elem[2]});
+
+    const float pixel_x = (transformed.x() + x_offset) / resolution;
+    const float pixel_y = (transformed.y() + y_offset) / resolution;
+
+    if (pixel_x < 0 || pixel_y < 0) {
+        return;
+    }
+
+    const auto i = static_cast<std::uint32_t>(pixel_y); // row idx
+    const auto j = static_cast<std::uint32_t>(pixel_x); // col idx
+
+    if (i >= m || j >= p) {
+        return;
+    }
+
+    const sl::uchar4 rgba = from_packed(elem[3]);
+    const std::uint32_t output_idx = i * p + j;
+    output[output_idx] = pack_bgra(rgba[2], rgba[1], rgba[0], rgba[3]);
+}
+
 int main(int argc, char* argv[]) {
     const Transform host_tf = {
         {
-            1, 0, 0,
-            0, 0, -1,
-            0, 1, 0
+            0.5, -0.14644661, 0.85355339,
+            0.5, 0.85355339, -0.14644661,
+            0.70710678, 0.5, 0.5
         },
         {1, 0, 0}
     };
 
     const auto device_tf_ptr = to_device(host_tf);
 
-    constexpr std::size_t WIDTH = 1280;
-    constexpr std::size_t HEIGHT = 720;
-    sl::Mat data = random_xyzrgba(WIDTH, HEIGHT);
+    constexpr std::uint32_t WIDTH = 1280;
+    constexpr std::uint32_t HEIGHT = 720;
+    const sl::Mat input = random_xyzrgba(WIDTH, HEIGHT);
 
-    constexpr std::size_t NUMEL = WIDTH * HEIGHT;
-    constexpr std::size_t BLOCKSIZE = 256;
-    constexpr std::size_t NUM_BLOCKS = div_to_inf(NUMEL, BLOCKSIZE);
+    constexpr float RESOLUTION = 0.05;
+    constexpr float X_RANGE = 20;
+    constexpr float Y_RANGE = 20;
+
+    constexpr auto OUTPUT_ROWS = static_cast<std::uint32_t>(Y_RANGE / RESOLUTION);
+    constexpr auto OUTPUT_COLS = static_cast<std::uint32_t>(X_RANGE / RESOLUTION);
+
+    cv::cuda::GpuMat output(OUTPUT_COLS, OUTPUT_ROWS, CV_8UC4, cv::Scalar(0, 0, 0, 255));
+
+    constexpr std::uint32_t NUMEL = WIDTH * HEIGHT;
+    constexpr std::uint32_t BLOCKSIZE = 256;
+    constexpr std::uint32_t NUM_BLOCKS = div_to_inf(NUMEL, BLOCKSIZE);
 
     cudaDeviceSynchronize();
     const auto start = std::chrono::steady_clock::now();
-    // Launch the kernel.
+
     transform<<<NUM_BLOCKS, BLOCKSIZE>>>(
         *device_tf_ptr,
-        data.getPtr<sl::float4>(sl::MEM_GPU),
-        NUMEL
+        input.getPtr<sl::float4>(sl::MEM_GPU),
+        NUMEL,
+        output.ptr<std::uint32_t>(),
+        OUTPUT_ROWS,
+        OUTPUT_COLS,
+        RESOLUTION,
+        X_RANGE / 2,
+        Y_RANGE / 2
     );
-    data.updateCPUfromGPU();
+
+    const cv::Mat output_host(output);
 
     cudaDeviceSynchronize();
     const auto end = std::chrono::steady_clock::now();
     const std::chrono::duration<double> elapsed = end - start;
 
     std::cout << "elapsed: " << elapsed.count() << "s\n";
+
+    cv::imwrite("output.png", output_host, {cv::IMWRITE_PNG_COMPRESSION, 9});
 }
