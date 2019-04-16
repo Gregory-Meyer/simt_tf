@@ -1,4 +1,4 @@
-#include "vector.h"
+#include "vector.cuh"
 
 #include <ostream>
 

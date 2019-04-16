@@ -7,7 +7,7 @@
 
 class Vector {
 public:
-    __host__ __device__ constexpr Vector() noexcept = default;
+    __host__ __device__ constexpr Vector() noexcept : data_{0, 0, 0} { }
 
     __host__ __device__ constexpr Vector(float x, float y, float z) noexcept : data_{x, y, z} { }
 
@@ -63,18 +63,6 @@ public:
         return data_;
     }
 
-    __host__ __device__ constexpr float* begin() noexcept {
-        return data_;
-    }
-
-    __host__ __device__ constexpr const float* begin() const noexcept {
-        return data_;
-    }
-
-    __host__ __device__ constexpr const float* cbegin() const noexcept {
-        return data_;
-    }
-
     __host__ __device__ constexpr float* end() noexcept {
         return data_ + 3;
     }
@@ -87,9 +75,25 @@ public:
         return data_ + 3;
     }
 
+    __host__ __device__ constexpr float* data() noexcept {
+        return data_;
+    }
+
+    __host__ __device__ constexpr const float* data() const noexcept {
+        return data_;
+    }
+
 private:
     alignas(16) float data_[3];
 };
+
+__host__ __device__ constexpr float dot(const Vector &lhs, const Vector &rhs) noexcept {
+    return (lhs.x() * rhs.x()) + (lhs.y() * rhs.y()) + (lhs.z() * rhs.z());
+}
+
+__host__ __device__ constexpr Vector operator+(const Vector &lhs, const Vector &rhs) noexcept {
+    return {lhs.x() + rhs.x(), lhs.y() + rhs.y(), lhs.z() + rhs.z()};
+}
 
 std::ostream& operator<<(std::ostream &os, const Vector &v);
 

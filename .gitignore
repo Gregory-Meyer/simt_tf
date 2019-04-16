@@ -109,3 +109,5 @@ _deps
 obj/
 
 # End of https://www.gitignore.io/api/c,c++,cuda,ninja,cmake,premake-gmake
+
+build/
