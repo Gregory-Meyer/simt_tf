@@ -1,4 +1,5 @@
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -14,10 +15,13 @@
 #include "vector.cuh"
 
 #include <sl/Core.hpp>
+#include <sl/Camera.hpp>
 
 #include <opencv2/core.hpp>
 #include <opencv2/core/cuda.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/videoio.hpp>
 
 struct CudaDeleter {
     template <typename T>
@@ -325,6 +329,30 @@ __global__ void transform(const Transform &tf, const sl::float4 *input, std::uin
 }
 
 int main(int argc, char* argv[]) {
+    std::ios_base::sync_with_stdio(false);
+    std::cin.tie(nullptr);
+
+    if (argc < 2) {
+        std::cerr << "missing argument filename\n";
+
+        return 1;
+    }
+
+    sl::InitParameters params;
+
+    params.camera_fps = 60;
+    params.svo_input_filename = argv[1];
+    params.coordinate_units = sl::UNIT_METER;
+    params.coordinate_system = sl::COORDINATE_SYSTEM_RIGHT_HANDED_Z_UP_X_FWD;
+    params.input.setFromSVOFile(argv[1]);
+
+    sl::Camera zed;
+    if (zed.open(std::move(params)) != sl::SUCCESS) {
+        std::cerr << "failed to open camera\n";
+
+        return 1;
+    }
+
     const Transform host_tf = {
         {
             0.5, -0.14644661, 0.85355339,
@@ -334,47 +362,57 @@ int main(int argc, char* argv[]) {
         {1, 0, 0}
     };
 
-    const auto device_tf_ptr = to_device(host_tf);
-
-    constexpr std::uint32_t WIDTH = 1280;
-    constexpr std::uint32_t HEIGHT = 720;
-    const sl::Mat input = random_xyzrgba(WIDTH, HEIGHT);
-
     constexpr float RESOLUTION = 0.05;
     constexpr float X_RANGE = 20;
     constexpr float Y_RANGE = 20;
+    constexpr float OUTPUT_ROWS = Y_RANGE / RESOLUTION;
+    constexpr float OUTPUT_COLS = X_RANGE / RESOLUTION;
 
-    constexpr auto OUTPUT_ROWS = static_cast<std::uint32_t>(Y_RANGE / RESOLUTION);
-    constexpr auto OUTPUT_COLS = static_cast<std::uint32_t>(X_RANGE / RESOLUTION);
+    const auto device_tf_ptr = to_device(host_tf);
+
+    sl::RuntimeParameters rt_params;
+    rt_params.enable_depth = false;
 
     cv::cuda::GpuMat output(OUTPUT_COLS, OUTPUT_ROWS, CV_8UC4, cv::Scalar(0, 0, 0, 255));
 
-    constexpr std::uint32_t NUMEL = WIDTH * HEIGHT;
-    constexpr std::uint32_t BLOCKSIZE = 256;
-    constexpr std::uint32_t NUM_BLOCKS = div_to_inf(NUMEL, BLOCKSIZE);
-
-    cudaDeviceSynchronize();
-    const auto start = std::chrono::steady_clock::now();
-
-    transform<<<NUM_BLOCKS, BLOCKSIZE>>>(
-        *device_tf_ptr,
-        input.getPtr<sl::float4>(sl::MEM_GPU),
-        NUMEL,
-        output.ptr<std::uint32_t>(),
-        OUTPUT_ROWS,
-        OUTPUT_COLS,
-        RESOLUTION,
-        X_RANGE / 2,
-        Y_RANGE / 2
+    cv::VideoWriter video(
+        "output.mp4",
+        cv::VideoWriter::fourcc('M', 'P', '4', 'V'),
+        60,
+        output.size()
     );
 
-    const cv::Mat output_host(output);
+    if (!video.isOpened()) {
+        std::cerr << "unable to open video for writing\n";
 
-    cudaDeviceSynchronize();
-    const auto end = std::chrono::steady_clock::now();
-    const std::chrono::duration<double> elapsed = end - start;
+        return 1;
+    }
 
-    std::cout << "elapsed: " << elapsed.count() << "s\n";
+    int i = 0;
+    while (zed.grab(rt_params) == sl::SUCCESS) {
+        std::cout << "frame " << ++i << '\n';
 
-    cv::imwrite("output.png", output_host, {cv::IMWRITE_PNG_COMPRESSION, 9});
+        sl::Mat pc;
+        zed.retrieveMeasure(pc, sl::MEASURE_XYZRGBA, sl::MEM_GPU);
+
+        const auto numel = static_cast<std::uint32_t>(pc.getResolution().area());
+        constexpr std::uint32_t BLOCKSIZE = 256;
+        const std::uint32_t num_blocks = div_to_inf(numel, BLOCKSIZE);
+
+        transform<<<num_blocks, BLOCKSIZE>>>(
+            *device_tf_ptr,
+            pc.getPtr<sl::float4>(sl::MEM_GPU),
+            numel,
+            output.ptr<std::uint32_t>(),
+            OUTPUT_ROWS,
+            OUTPUT_COLS,
+            RESOLUTION,
+            X_RANGE / 2,
+            Y_RANGE / 2
+        );
+
+        cv::Mat output_host(output);
+        cv::cvtColor(output_host, output_host, CV_BGRA2BGR);
+        video.write(output_host);
+    }
 }
