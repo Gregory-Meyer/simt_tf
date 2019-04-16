@@ -6,7 +6,7 @@
 
 class Transform {
 public:
-    constexpr Transform() noexcept = default;
+    Transform() noexcept = default;
 
     __host__ __device__ constexpr Transform(const Matrix &basis, const Vector &origin) noexcept
     : basis_(basis), origin_(origin) { }

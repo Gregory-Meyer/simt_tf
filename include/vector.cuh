@@ -7,7 +7,7 @@
 
 class Vector {
 public:
-    __host__ __device__ constexpr Vector() noexcept : data_{0, 0, 0} { }
+    Vector() noexcept = default;
 
     __host__ __device__ constexpr Vector(float x, float y, float z) noexcept : data_{x, y, z} { }
 

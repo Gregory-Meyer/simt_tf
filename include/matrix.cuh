@@ -9,7 +9,7 @@
 
 class Matrix {
 public:
-    constexpr Matrix() noexcept = default;
+    Matrix() noexcept = default;
 
     __host__ __device__ constexpr Matrix(float xx, float xy, float xz,
                                          float yx, float yy, float yz,
