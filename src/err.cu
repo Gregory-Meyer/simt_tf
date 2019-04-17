@@ -42,3 +42,34 @@ const std::error_category& cuda_category() noexcept {
 std::error_code make_error_code(cudaError_t error) noexcept {
     return {static_cast<int>(error), cuda_category()};
 }
+
+namespace sl {
+
+class SlCategory : public std::error_category {
+public:
+    SlCategory() noexcept = default;
+
+    virtual ~SlCategory() = default;
+
+    const char* name() const noexcept override {
+        return "sl::SlCategory";
+    }
+
+    std::string message(int condition) const override {
+        const String msg = toString(static_cast<ERROR_CODE>(condition));
+
+        return {msg.c_str()};
+    }
+};
+
+const std::error_category& sl_category() noexcept {
+    static const SlCategory category;
+
+    return category;
+}
+
+std::error_code make_error_code(ERROR_CODE error) noexcept {
+    return {static_cast<int>(error), sl_category()};
+}
+
+} // namespace sl
