@@ -1,8 +1,10 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <random>
 #include <system_error>
@@ -19,6 +21,7 @@
 
 #include <opencv2/core.hpp>
 #include <opencv2/core/cuda.hpp>
+#include <opencv2/cudaimgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
@@ -277,6 +280,10 @@ __host__ __device__ std::uint32_t pack_bgra(
     return Converter{{b, g, r, a}}.scalar;
 }
 
+__host__ __device__ bool isnan(const sl::float4 &v) noexcept {
+    return std::isnan(v[0]) || std::isnan(v[1]) || std::isnan(v[2]);
+}
+
 /**
  *  @param input Points to an array of length n. Each element must be
  *               a 4-tuple (X, Y, Z, RGBA) corresponding to a depth
@@ -307,6 +314,11 @@ __global__ void transform(const Transform &tf, const sl::float4 *input, std::uin
     }
 
     const sl::float4 &elem = input[pixel_idx];
+
+    if (isnan(elem)) {
+        return;
+    }
+
     const Vector transformed = tf({elem[0], elem[1], elem[2]});
 
     const float pixel_x = (transformed.x() + x_offset) / resolution;
@@ -328,12 +340,31 @@ __global__ void transform(const Transform &tf, const sl::float4 *input, std::uin
     output[output_idx] = pack_bgra(rgba[2], rgba[1], rgba[0], rgba[3]);
 }
 
+__global__ void write_zeros(std::uint32_t *to_zero, std::uint32_t n) {
+    const std::uint32_t pixel_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+    if (pixel_idx >= n) {
+        return;
+    }
+
+    to_zero[pixel_idx] = 0;
+}
+
+std::ostream& operator<<(std::ostream &os, const sl::uchar4 &v) {
+    return os << '{' << static_cast<int>(v[0]) << ", " << static_cast<int>(v[1])
+              << ", " << static_cast<int>(v[2]) << ", " << static_cast<int>(v[3]) << '}';
+}
+
+std::ostream& operator<<(std::ostream &os, const sl::float4 &v) {
+    return os << '{' << v[0] << ", " << v[1] << ", " << v[2] << ", " << from_packed(v[3]) << '}';
+}
+
 int main(int argc, char* argv[]) {
     std::ios_base::sync_with_stdio(false);
     std::cin.tie(nullptr);
 
     if (argc < 2) {
-        std::cerr << "missing argument filename\n";
+        std::cout << "missing argument filename\n";
 
         return 1;
     }
@@ -348,38 +379,33 @@ int main(int argc, char* argv[]) {
 
     sl::Camera zed;
     if (zed.open(std::move(params)) != sl::SUCCESS) {
-        std::cerr << "failed to open camera\n";
+        std::cout << "failed to open camera\n";
 
         return 1;
     }
 
     const Transform host_tf = {
         {
-            0.5, -0.14644661, 0.85355339,
-            0.5, 0.85355339, -0.14644661,
-            0.70710678, 0.5, 0.5
+            0.70710678, -0.70710678, 0,
+            0.70710678, 0.70710678, 0,
+            0, 0, 1,
         },
-        {1, 0, 0}
+        {0, 0, 0}
     };
 
-    constexpr float RESOLUTION = 0.05;
-    constexpr float X_RANGE = 20;
-    constexpr float Y_RANGE = 20;
-    constexpr float OUTPUT_ROWS = Y_RANGE / RESOLUTION;
-    constexpr float OUTPUT_COLS = X_RANGE / RESOLUTION;
+    constexpr float RESOLUTION = 0.01;
+    constexpr float OUTPUT_ROWS = 1080;
+    constexpr float OUTPUT_COLS = 1920;
+    constexpr float X_RANGE = OUTPUT_COLS * RESOLUTION;
+    constexpr float Y_RANGE = OUTPUT_ROWS * RESOLUTION;
 
     const auto device_tf_ptr = to_device(host_tf);
 
-    sl::RuntimeParameters rt_params;
-    rt_params.enable_depth = false;
-
-    cv::cuda::GpuMat output(OUTPUT_COLS, OUTPUT_ROWS, CV_8UC4, cv::Scalar(0, 0, 0, 255));
-
     cv::VideoWriter video(
-        "output.mp4",
+        "depth.mp4",
         cv::VideoWriter::fourcc('M', 'P', '4', 'V'),
         60,
-        output.size()
+        {1920, 1080}
     );
 
     if (!video.isOpened()) {
@@ -389,11 +415,17 @@ int main(int argc, char* argv[]) {
     }
 
     int i = 0;
-    while (zed.grab(rt_params) == sl::SUCCESS) {
+    sl::Mat pc;
+    cv::cuda::GpuMat output(1080, 1920, CV_8UC4, cv::Scalar(255, 255, 255, 255));
+
+    while (zed.grab() == sl::SUCCESS) {
         std::cout << "frame " << ++i << '\n';
 
-        sl::Mat pc;
-        zed.retrieveMeasure(pc, sl::MEASURE_XYZRGBA, sl::MEM_GPU);
+        if (zed.retrieveMeasure(pc, sl::MEASURE_XYZRGBA, sl::MEM_GPU) != sl::SUCCESS) {
+            std::cerr << "failed to retrieve pointcloud from ZED\n";
+
+            return 1;
+        }
 
         const auto numel = static_cast<std::uint32_t>(pc.getResolution().area());
         constexpr std::uint32_t BLOCKSIZE = 256;
@@ -412,6 +444,12 @@ int main(int argc, char* argv[]) {
         );
 
         cv::Mat output_host(output);
+
+        write_zeros<<<div_to_inf(1920 * 1080, BLOCKSIZE), BLOCKSIZE>>>(
+            output.ptr<std::uint32_t>(),
+            1920 * 1080
+        );
+
         cv::cvtColor(output_host, output_host, CV_BGRA2BGR);
         video.write(output_host);
     }
