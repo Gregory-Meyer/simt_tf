@@ -2,16 +2,18 @@ cmake_minimum_required(VERSION 3.12)
 
 project(SimtTf VERSION 0.1.0 LANGUAGES CXX CUDA)
 
-find_package(ZED 2.7 REQUIRED)
+find_package(CUDA 10.0 REQUIRED)
 find_package(OpenCV 3.4 REQUIRED)
+find_package(ZED 2.7 REQUIRED)
 
 add_library(simt_tf STATIC src/err.cu src/matrix.cu src/simt_tf.cu
                            src/transform.cu src/vector.cu)
 add_library(SimtTf::simt_tf ALIAS simt_tf)
 target_include_directories(simt_tf
     PUBLIC
-        ${ZED_INCLUDE_DIRS}
+        ${CUDA_INCLUDE_DIRS}
         ${OpenCV_INCLUDE_DIRS}
+        ${ZED_INCLUDE_DIRS}
         $<INSTALL_INTERFACE:include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE
