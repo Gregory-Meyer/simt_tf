@@ -29,7 +29,7 @@ target_link_libraries(simt_tf
 )
 
 include(GNUInstallDirs)
-set(INSTALL_CONFIGDIR ${CMAKE_INSTALL_LIBDIR}/cmake/JSONUtils)
+set(INSTALL_CONFIGDIR ${CMAKE_INSTALL_LIBDIR}/cmake/SimtTf)
 
 install(TARGETS simt_tf
     EXPORT simt_tf-targets
