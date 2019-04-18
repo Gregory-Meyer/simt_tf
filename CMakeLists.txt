@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.12)
 
-project(SimtTf VERSION 0.2.1 LANGUAGES CXX CUDA)
+project(SimtTf VERSION 0.2.2 LANGUAGES CXX CUDA)
 
 find_package(CUDA REQUIRED)
 find_package(OpenCV 3.4 REQUIRED)
