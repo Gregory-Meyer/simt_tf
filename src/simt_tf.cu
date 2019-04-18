@@ -102,8 +102,16 @@ __global__ void transform(
         return;
     }
 
-    const auto row = static_cast<std::uint32_t>(pixel_y);
     const auto col = static_cast<std::uint32_t>(pixel_x);
+
+    if (col >= output_cols) {
+        return;
+    }
+
+    // an out of bounds row index will be caught below due to the
+    // nature of row-major indexing
+    // trust me
+    const auto row = static_cast<std::uint32_t>(pixel_y);
     const std::uint32_t output_idx = row * output_cols + col;
 
     if (output_idx >= output_numel) {
