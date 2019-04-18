@@ -15,10 +15,10 @@
 
 #define TRY(MSG, ...) \
     do {\
-        const sl::ERROR_CODE errc = __VA_ARGS__;\
+        const sl::ERROR_CODE TRY_RESERVED_ERRC = __VA_ARGS__;\
         \
-        if (errc != sl::SUCCESS) {\
-            const sl::String msg = sl::toString(errc);\
+        if (TRY_RESERVED_ERRC != sl::SUCCESS) {\
+            const sl::String msg = sl::toString(TRY_RESERVED_ERRC);\
             std::cerr << MSG << ": " << msg.c_str() << '\n';\
             std::exit(EXIT_FAILURE);\
         }\
@@ -30,10 +30,15 @@ int main(int argc, const char *const argv[]) {
     params.camera_fps = 60;
     params.coordinate_units = sl::UNIT_METER;
     params.coordinate_system = sl::COORDINATE_SYSTEM_RIGHT_HANDED_Z_UP_X_FWD;
+    params.depth_mode = sl::DEPTH_MODE_PERFORMANCE;
+    params.camera_resolution = sl::RESOLUTION_HD720;
+
+    bool from_svo = false;
 
     if (argc > 1) {
         params.svo_input_filename = argv[1];
         params.input.setFromSVOFile(argv[1]);
+        from_svo = true;
     }
 
     sl::Camera camera;
@@ -46,15 +51,33 @@ int main(int argc, const char *const argv[]) {
         {0, 0, 0}
     };
 
-    cv::cuda::GpuMat output(1080, 1080, CV_8UC4);
+    cv::cuda::GpuMat output(1024, 1024, CV_8UC4);
+    cv::Mat host_output;
     sl::Mat pointcloud;
 
     const auto start = std::chrono::steady_clock::now();
     int num_frames = 0;
 
-    while (camera.grab() == sl::SUCCESS) {
+    while (true) {
+        const sl::ERROR_CODE errc = camera.grab();
+
+        if (errc != sl::SUCCESS) {
+            if (errc == sl::ERROR_CODE_NOT_A_NEW_FRAME) {
+                if (from_svo) {
+                    break;
+                } else {
+                    continue;
+                }
+            }
+
+            const sl::String msg = sl::toString(errc);
+            std::cerr << "Camera::grab() failed: " << msg.c_str() << '\n';
+
+            return 1;
+        }
+
         simt_tf::pointcloud_birdseye(tf, camera, pointcloud, output, 0.01);
-        const cv::Mat host_birdseye(output);
+        output.download(host_output);
 
         const auto now = std::chrono::steady_clock::now();
         const std::chrono::duration<double> elapsed = now - start;
@@ -62,9 +85,9 @@ int main(int argc, const char *const argv[]) {
 
         const double fps = static_cast<double>(num_frames) / elapsed.count();
 
-        std::cout << fps << "\n";
+        std::cout << "frame " << num_frames << ": " << fps << " fps\n";
 
-        cv::imshow("transformed", host_birdseye);
+        cv::imshow("bird's eye transform", host_output);
         cv::waitKey(1);
     }
 }

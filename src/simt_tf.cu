@@ -77,8 +77,9 @@ constexpr std::size_t div_to_inf(std::size_t x, std::size_t y) noexcept {
  */
 __global__ void transform(
     simt_tf::Transform tf, const sl::float4 *input,
-    std::uint32_t n, std::uint32_t *output, std::uint32_t output_cols,
-    std::uint32_t output_numel, float resolution, float x_offset,
+    std::uint32_t n, std::uint32_t *output, std::uint32_t output_rows,
+    std::uint32_t output_cols, std::uint32_t output_stride, float resolution,
+    float x_offset,
     float y_offset
 ) {
     const std::uint32_t pixel_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -103,21 +104,13 @@ __global__ void transform(
     }
 
     const auto col = static_cast<std::uint32_t>(pixel_x);
-
-    if (col >= output_cols) {
-        return;
-    }
-
-    // an out of bounds row index will be caught below due to the
-    // nature of row-major indexing
-    // trust me
     const auto row = static_cast<std::uint32_t>(pixel_y);
-    const std::uint32_t output_idx = row * output_cols + col;
 
-    if (output_idx >= output_numel) {
+    if (col >= output_cols || row >= output_rows) {
         return;
     }
 
+    const std::uint32_t output_idx = row * output_stride + col;
     output[output_idx] = as_u32(elem[3]);
 }
 
@@ -171,6 +164,7 @@ void pointcloud_birdseye(
 
     const auto output_cols = static_cast<std::uint32_t>(output.size().width);
     const auto output_rows = static_cast<std::uint32_t>(output.size().height);
+    const auto output_stride = static_cast<std::uint32_t>(output.step / output.elemSize());
     const float x_range = static_cast<float>(output_cols) * resolution;
     const float y_range = static_cast<float>(output_rows) * resolution;
 
@@ -182,8 +176,9 @@ void pointcloud_birdseye(
         pointcloud.getPtr<sl::float4>(sl::MEM_GPU),
         numel,
         output.ptr<std::uint32_t>(),
+        output_rows,
         output_cols,
-        output_numel,
+        output_stride,
         resolution,
         x_range / 2,
         y_range / 2
