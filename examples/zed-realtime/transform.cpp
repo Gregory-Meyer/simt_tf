@@ -1,10 +1,10 @@
 #include <simt_tf/simt_tf.h>
 
+#include <csignal>
 #include <cstdlib>
+#include <atomic>
 #include <chrono>
 #include <iostream>
-
-#include <cuda.h>
 
 #include <opencv2/core.hpp>
 #include <opencv2/core/cuda.hpp>
@@ -24,14 +24,20 @@
         }\
     } while (false)
 
+static std::atomic<bool> keep_running(true);
+
+static void handle_sigint(int) noexcept {
+    keep_running.store(false);
+}
+
 int main(int argc, const char *const argv[]) {
     sl::InitParameters params;
 
-    params.camera_fps = 60;
+    params.camera_fps = 15;
     params.coordinate_units = sl::UNIT_METER;
     params.coordinate_system = sl::COORDINATE_SYSTEM_RIGHT_HANDED_Z_UP_X_FWD;
-    params.depth_mode = sl::DEPTH_MODE_PERFORMANCE;
-    params.camera_resolution = sl::RESOLUTION_HD720;
+    params.depth_mode = sl::DEPTH_MODE_ULTRA;
+    params.camera_resolution = sl::RESOLUTION_HD2K;
 
     bool from_svo = false;
 
@@ -43,6 +49,7 @@ int main(int argc, const char *const argv[]) {
 
     sl::Camera camera;
     TRY("couldn't open ZED camera", camera.open(std::move(params)));
+    std::signal(SIGINT, handle_sigint);
 
     const simt_tf::Transform tf = {
         {1, 0, 0,
@@ -58,7 +65,7 @@ int main(int argc, const char *const argv[]) {
     const auto start = std::chrono::steady_clock::now();
     int num_frames = 0;
 
-    while (true) {
+    while (keep_running.load()) {
         const sl::ERROR_CODE errc = camera.grab();
 
         if (errc != sl::SUCCESS) {
