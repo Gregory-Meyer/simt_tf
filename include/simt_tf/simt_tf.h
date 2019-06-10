@@ -24,46 +24,38 @@
 #ifndef SIMT_TF_SIMT_TF_H
 #define SIMT_TF_SIMT_TF_H
 
+#include <simt_tf/matrix_span.h>
 #include <simt_tf/transform.h>
+#include <simt_tf/vector4.h>
 
 #include <cstddef>
 #include <cstdint>
 
-#include <opencv2/core/cuda.hpp>
-
-#include <sl/Core.hpp>
-#include <sl/Camera.hpp>
-
 namespace simt_tf {
 
 /**
- *  Fetches the left-side pointcloud from a ZED camera, then performs a
- *  GPU-accelerated transform (translate then rotate) on each point and
- *  projects it into a bird's eye view.
+ *  Transforms each point in a pointcloud to another coordinate frame
+ *  and projects them onto the x-y plane.
  *
- *  @param tf Must be a valid coordinate transform, meaning that the
- *            determinant of its basis rotation matrix must be 1.
- *  @param camera Must be opened, have the latest data grabbed, and
- *                have support for depth images and pointclouds.
- *                It is assumed that x is forward, y, is left, and
- *                z is up, in accordance with ROS REP 103.
- *  @param pointcloud The pointcloud to place the pointcloud retrieved
- *                    from the ZED.
- *  @param output The matrix to place the bird's eye transformed image
- *                in.
- *  @param resolution The resolution, in whatever unit the ZED is
- *                    configured to output in, of each cell of the
- *                    output matrix. In other words, each cell
- *                    represents a (resolution x resolution) square in
- *                    free space.
- *
- *  @throws std::system_error if any ZED SDK or CUDA function call
- *          fails.
+ *  @param tf The coordinate transform to apply.
+ *  @param pointcloud The pointcloud to read data from. Its memory
+ *                    should be accessible from the GPU in the current
+ *                    CUDA context.
+ *  @param pixels The pixels to transform and project. Its memory
+ *                should be accessible from the GPU in the current CUDA
+ *                context.
+ *  @param transformed The matrix to transform and project the pixels
+ *                     onto. Its memory should be accessible from the
+ *                     GPU in the current CUDA context.
+ *  @param resolution The resolution of each cell in the output matrix.
+ *                    In other words, each cell represents a
+ *                    (resolution x resolution) square in whatever
+ *                    units that input pointcloud is in.
  */
-void pointcloud_birdseye(
-    const Transform &tf, sl::Camera &camera, sl::Mat &pointcloud,
-    cv::cuda::GpuMat &output, float resolution
-);
+void transform_project(const Transform &tf,
+                       MatrixSpan<const Vector4> pointcloud,
+                       MatrixSpan<const std::uint8_t> pixels,
+                       MatrixSpan<std::uint8_t> transformed, float resolution);
 
 } // namespace simt_tf
 

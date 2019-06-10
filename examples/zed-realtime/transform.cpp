@@ -1,9 +1,8 @@
 #include <simt_tf/simt_tf.h>
 
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
-#include <atomic>
-#include <chrono>
 #include <iostream>
 
 #include <opencv2/core.hpp>
@@ -13,88 +12,102 @@
 #include <sl/Camera.hpp>
 #include <sl/Core.hpp>
 
-#define TRY(MSG, ...) \
-    do {\
-        const sl::ERROR_CODE TRY_RESERVED_ERRC = __VA_ARGS__;\
-        \
-        if (TRY_RESERVED_ERRC != sl::SUCCESS) {\
-            const sl::String msg = sl::toString(TRY_RESERVED_ERRC);\
-            std::cerr << MSG << ": " << msg.c_str() << '\n';\
-            std::exit(EXIT_FAILURE);\
-        }\
-    } while (false)
+#define TRY(MSG, ...)                                                          \
+  do {                                                                         \
+    const sl::ERROR_CODE TRY_RESERVED_ERRC = __VA_ARGS__;                      \
+                                                                               \
+    if (TRY_RESERVED_ERRC != sl::SUCCESS) {                                    \
+      const sl::String msg = sl::toString(TRY_RESERVED_ERRC);                  \
+      std::cerr << MSG << ": " << msg.c_str() << '\n';                         \
+      std::exit(EXIT_FAILURE);                                                 \
+    }                                                                          \
+  } while (false)
 
 static std::atomic<bool> keep_running(true);
 
-static void handle_sigint(int) noexcept {
-    keep_running.store(false);
-}
+static void handle_sigint(int) noexcept { keep_running.store(false); }
 
 int main(int argc, const char *const argv[]) {
-    sl::InitParameters params;
+  sl::InitParameters params;
 
-    params.camera_fps = 15;
-    params.coordinate_units = sl::UNIT_METER;
-    params.coordinate_system = sl::COORDINATE_SYSTEM_RIGHT_HANDED_Z_UP_X_FWD;
-    params.depth_mode = sl::DEPTH_MODE_ULTRA;
-    params.camera_resolution = sl::RESOLUTION_HD2K;
+  params.camera_fps = 15;
+  params.coordinate_units = sl::UNIT_METER;
+  params.coordinate_system = sl::COORDINATE_SYSTEM_RIGHT_HANDED_Z_UP_X_FWD;
+  params.depth_mode = sl::DEPTH_MODE_ULTRA;
+  params.camera_resolution = sl::RESOLUTION_HD2K;
 
-    bool from_svo = false;
+  bool from_svo = false;
 
-    if (argc > 1) {
-        params.svo_input_filename = argv[1];
-        params.input.setFromSVOFile(argv[1]);
-        from_svo = true;
-    }
+  if (argc > 1) {
+    params.svo_input_filename = argv[1];
+    params.input.setFromSVOFile(argv[1]);
+    from_svo = true;
+  }
 
-    sl::Camera camera;
-    TRY("couldn't open ZED camera", camera.open(std::move(params)));
-    std::signal(SIGINT, handle_sigint);
+  sl::Camera camera;
+  TRY("couldn't open ZED camera", camera.open(std::move(params)));
+  std::signal(SIGINT, handle_sigint);
 
-    const simt_tf::Transform tf = {
-        {1, 0, 0,
-         0, 1, 0,
-         0, 0, 1},
-        {0, 0, 0}
-    };
+  const simt_tf::Transform tf = {{1, 0, 0, 0, 1, 0, 0, 0, 1}, {0, 0, 0}};
 
-    cv::cuda::GpuMat output(1024, 1024, CV_8UC4);
-    cv::Mat host_output;
-    sl::Mat pointcloud;
+  cv::cuda::GpuMat output(1024, 1024, CV_8UC4);
+  cv::Mat host_output;
+  sl::Mat left_grey;
+  sl::Mat pointcloud;
 
-    const auto start = std::chrono::steady_clock::now();
-    int num_frames = 0;
+  const auto start = std::chrono::steady_clock::now();
+  int num_frames = 0;
 
-    while (keep_running.load()) {
-        const sl::ERROR_CODE errc = camera.grab();
+  while (keep_running.load()) {
+    const sl::ERROR_CODE errc = camera.grab();
 
-        if (errc != sl::SUCCESS) {
-            if (errc == sl::ERROR_CODE_NOT_A_NEW_FRAME) {
-                if (from_svo) {
-                    break;
-                } else {
-                    continue;
-                }
-            }
-
-            const sl::String msg = sl::toString(errc);
-            std::cerr << "Camera::grab() failed: " << msg.c_str() << '\n';
-
-            return 1;
+    if (errc != sl::SUCCESS) {
+      if (errc == sl::ERROR_CODE_NOT_A_NEW_FRAME) {
+        if (from_svo) {
+          break;
+        } else {
+          continue;
         }
+      }
 
-        simt_tf::pointcloud_birdseye(tf, camera, pointcloud, output, 0.01);
-        output.download(host_output);
+      const sl::String msg = sl::toString(errc);
+      std::cerr << "Camera::grab() failed: " << msg.c_str() << '\n';
 
-        const auto now = std::chrono::steady_clock::now();
-        const std::chrono::duration<double> elapsed = now - start;
-        ++num_frames;
-
-        const double fps = static_cast<double>(num_frames) / elapsed.count();
-
-        std::cout << "frame " << num_frames << ": " << fps << " fps\n";
-
-        cv::imshow("bird's eye transform", host_output);
-        cv::waitKey(1);
+      return EXIT_FAILURE;
     }
+
+    TRY("Camera::retrieveImage() failed",
+        camera.retrieveImage(left_grey, sl::VIEW_LEFT_GRAY, sl::MEM_GPU));
+    TRY("Camera::retrieveMeasure() failed",
+        camera.retrieveMeasure(pointcloud, sl::MEASURE_XYZ, sl::MEM_GPU));
+
+    const simt_tf::MatrixSpan<const simt_tf::Vector4> pointcloud_span(
+        pointcloud.getPtr<simt_tf::Vector4>(sl::MEM_GPU),
+        pointcloud.getHeight(), pointcloud.getWidth(),
+        pointcloud.getStep<simt_tf::Vector4>(sl::MEM_GPU));
+
+    const simt_tf::MatrixSpan<const std::uint8_t> left_grey_span(
+        left_grey.getPtr<std::uint8_t>(sl::MEM_GPU), left_grey.getHeight(),
+        left_grey.getWidth(), left_grey.getStep<std::uint8_t>(sl::MEM_GPU));
+
+    const simt_tf::MatrixSpan<simt_tf::Vector4> output_span(
+        output.ptr<std::uint8_t>(), output.size().height, output.size().width,
+        output.step / output.elemSize());
+
+    output.setTo(0);
+    simt_tf::transform_project(tf, pointcloud_span, left_grey_span, output_span,
+                               0.01);
+    output.download(host_output);
+
+    const auto now = std::chrono::steady_clock::now();
+    const std::chrono::duration<double> elapsed = now - start;
+    ++num_frames;
+
+    const double fps = static_cast<double>(num_frames) / elapsed.count();
+
+    std::cout << "frame " << num_frames << ": " << fps << " fps\n";
+
+    cv::imshow("bird's eye transform", host_output);
+    cv::waitKey(1);
+  }
 }

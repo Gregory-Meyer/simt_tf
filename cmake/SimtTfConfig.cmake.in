@@ -2,10 +2,7 @@ get_filename_component(SimtTf_CMAKE_DIR "${CMAKE_CURRENT_LIST_FILE}" PATH)
 include(CMakeFindDependencyMacro)
 
 list(APPEND CMAKE_MODULE_PATH ${SimtTf_CMAKE_DIR})
-
 find_package(CUDA REQUIRED)
-find_package(OpenCV 3.4 REQUIRED)
-find_package(ZED 2.7 REQUIRED)
 list(REMOVE_AT CMAKE_MODULE_PATH -1)
 
 if(NOT TARGET SimtTf::SimtTf)

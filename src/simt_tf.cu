@@ -23,36 +23,20 @@
 
 #include <simt_tf/simt_tf.h>
 
-#include "err.cuh"
-
 #include <cassert>
 #include <cmath>
-#include <atomic>
-#include <mutex>
 
+namespace simt_tf {
 namespace {
 
-__host__ __device__ bool isnan(const sl::float4 &v) noexcept {
-    return std::isnan(v[0]) || std::isnan(v[1]) || std::isnan(v[2]);
-}
-
-__host__ __device__ std::uint32_t as_u32(float x) noexcept {
-    union Converter {
-        float f;
-        std::uint32_t i;
-    };
-
-    return Converter{x}.i;
-}
-
 constexpr std::size_t div_to_inf(std::size_t x, std::size_t y) noexcept {
-    const std::size_t res = x / y;
+  const std::size_t res = x / y;
 
-    if (x % y != 0) {
-        return res + 1;
-    }
+  if (x % y != 0) {
+    return res + 1;
+  }
 
-    return res;
+  return res;
 }
 
 /**
@@ -75,114 +59,84 @@ constexpr std::size_t div_to_inf(std::size_t x, std::size_t y) noexcept {
  *                  at (0, 0) is located in free space at (-x_offset,
  *                  -y_offset).
  */
-__global__ void transform(
-    simt_tf::Transform tf, const sl::float4 *input,
-    std::uint32_t n, std::uint32_t *output, std::uint32_t output_rows,
-    std::uint32_t output_cols, std::uint32_t output_stride, float resolution,
-    float x_offset,
-    float y_offset
-) {
-    const std::uint32_t pixel_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+__global__ void transform(Transform tf, MatrixSpan<const Vector4> pointcloud,
+                          MatrixSpan<const std::uint8_t> pixels,
+                          MatrixSpan<std::uint8_t> transformed,
+                          float resolution, float x_offset, float y_offset) {
+  const std::uint32_t pointcloud_row = (blockIdx.y * blockDim.y) + threadIdx.y;
+  const std::uint32_t pointcloud_col = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-    if (pixel_idx >= n) {
-        return;
-    }
+  if (pointcloud_row >= pointcloud.num_rows() ||
+      pointcloud_col >= pointcloud.num_cols()) {
+    return;
+  }
 
-    const sl::float4 elem = input[pixel_idx];
+  const Vector3 this_point =
+      pointcloud[pointcloud_row][pointcloud_col].as_vec3();
 
-    if (isnan(elem)) {
-        return;
-    }
+  if (isnan(this_point)) {
+    return;
+  }
 
-    const simt_tf::Vector transformed = tf({elem[0], elem[1], elem[2]});
+  const Vector3 point_transformed =
+      tf({this_point.x(), this_point.y(), this_point.z()});
 
-    const float pixel_x = (transformed.x() + x_offset) / resolution;
-    const float pixel_y = (transformed.y() + y_offset) / resolution;
+  const float pixel_x = (point_transformed.x() + x_offset) / resolution;
+  const float pixel_y = (point_transformed.y() + y_offset) / resolution;
 
-    if (pixel_x < 0 || pixel_y < 0) {
-        return;
-    }
+  if (pixel_x < 0 || pixel_y < 0) {
+    return;
+  }
 
-    const auto col = static_cast<std::uint32_t>(pixel_x);
-    const auto row = static_cast<std::uint32_t>(pixel_y);
+  const auto output_col = static_cast<std::uint32_t>(pixel_x);
+  const auto output_row = static_cast<std::uint32_t>(pixel_y);
 
-    if (col >= output_cols || row >= output_rows) {
-        return;
-    }
+  if (output_row >= transformed.num_rows() ||
+      output_col >= transformed.num_cols()) {
+    return;
+  }
 
-    const std::uint32_t output_idx = row * output_stride + col;
-    output[output_idx] = as_u32(elem[3]);
+  transformed[output_row][output_col] = pixels[pointcloud_row][pointcloud_col];
 }
 
 } // namespace
 
-namespace simt_tf {
-
 /**
- *  Fetches the left-side pointcloud from a ZED camera, then performs a
- *  GPU-accelerated transform (translate then rotate) on each point and
- *  projects it into a bird's eye view.
+ *  Transforms each point in a pointcloud to another coordinate frame
+ *  and projects them onto the x-y plane.
  *
- *  @param tf Must be a valid coordinate transform, meaning that the
- *            determinant of its basis rotation matrix must be 1.
- *  @param camera Must be opened, have the latest data grabbed, and
- *                have support for depth images and pointclouds.
- *                It is assumed that x is forward, y, is left, and
- *                z is up, in accordance with ROS REP 103.
- *  @param pointcloud The pointcloud to place the pointcloud retrieved
- *                    from the ZED.
- *  @param output The matrix to place the bird's eye transformed image
- *                in.
- *  @param resolution The resolution, in whatever unit the ZED is
- *                    configured to output in, of each cell of the
- *                    output matrix. In other words, each cell
- *                    represents a (resolution x resolution) square in
- *                    free space.
- *
- *  @throws std::system_error if any ZED SDK or CUDA function call
- *          fails.
+ *  @param tf The coordinate transform to apply.
+ *  @param pointcloud The pointcloud to read data from. Its memory
+ *                    should be accessible from the GPU in the current
+ *                    CUDA context.
+ *  @param pixels The pixels to transform and project. Its memory
+ *                should be accessible from the GPU in the current CUDA
+ *                context.
+ *  @param transformed The matrix to transform and project the pixels
+ *                     onto. Its memory should be accessible from the
+ *                     GPU in the current CUDA context.
+ *  @param resolution The resolution of each cell in the output matrix.
+ *                    In other words, each cell represents a
+ *                    (resolution x resolution) square in whatever
+ *                    units that input pointcloud is in.
  */
-void pointcloud_birdseye(
-    const Transform &tf, sl::Camera &camera, sl::Mat &pointcloud,
-    cv::cuda::GpuMat &output, float resolution
-) {
-    assert(camera.isOpened());
+void transform_project(const Transform &tf,
+                       MatrixSpan<const Vector4> pointcloud,
+                       MatrixSpan<const std::uint8_t> pixels,
+                       MatrixSpan<std::uint8_t> transformed, float resolution) {
+  assert(pointcloud.num_rows() == pixels.num_rows());
+  assert(pointcloud.num_cols() == pixels.num_cols());
 
-    cuCtxSetCurrent(camera.getCUDAContext());
+  const float x_range = static_cast<float>(transformed.num_cols()) * resolution;
+  const float y_range = static_cast<float>(transformed.num_rows()) * resolution;
 
-    const auto output_numel = static_cast<std::uint32_t>(output.size().area());
-    constexpr std::uint32_t BLOCKSIZE = 256;
+  constexpr std::size_t BLOCKSIZE = 16;
+  const std::size_t num_blocks_x = div_to_inf(pointcloud.num_rows(), BLOCKSIZE);
+  const std::size_t num_blocks_y = div_to_inf(pointcloud.num_cols(), BLOCKSIZE);
 
-    cudaMemset(output.ptr<std::uint32_t>(), 0, output_numel * sizeof(std::uint32_t));
-
-    const std::error_code pc_ret =
-        camera.retrieveMeasure(pointcloud, sl::MEASURE_XYZBGRA, sl::MEM_GPU);
-
-    if (pc_ret) {
-        throw std::system_error(pc_ret);
-    }
-
-    const auto output_cols = static_cast<std::uint32_t>(output.size().width);
-    const auto output_rows = static_cast<std::uint32_t>(output.size().height);
-    const auto output_stride = static_cast<std::uint32_t>(output.step / output.elemSize());
-    const float x_range = static_cast<float>(output_cols) * resolution;
-    const float y_range = static_cast<float>(output_rows) * resolution;
-
-    const auto numel = static_cast<std::uint32_t>(pointcloud.getResolution().area());
-    const std::uint32_t num_blocks = div_to_inf(numel, BLOCKSIZE);
-
-    transform<<<num_blocks, BLOCKSIZE>>>(
-        tf,
-        pointcloud.getPtr<sl::float4>(sl::MEM_GPU),
-        numel,
-        output.ptr<std::uint32_t>(),
-        output_rows,
-        output_cols,
-        output_stride,
-        resolution,
-        x_range / 2,
-        y_range / 2
-    );
+  transform<<<dim3(num_blocks_x, num_blocks_y), dim3(BLOCKSIZE, BLOCKSIZE)>>>(
+      tf, pointcloud, pixels, transformed, resolution, x_range / 2,
+      y_range / 2);
 }
 
 } // namespace simt_tf

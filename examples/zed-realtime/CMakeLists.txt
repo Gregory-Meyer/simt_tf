@@ -1,8 +1,8 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.14)
 
 project(SimtTfZedRealtimeExample)
 
-find_package(SimtTf 0.1 REQUIRED)
+find_package(SimtTf 0.3 REQUIRED)
 
 add_executable(transform transform.cpp)
 set_target_properties(transform PROPERTIES CXX_STANDARD 14

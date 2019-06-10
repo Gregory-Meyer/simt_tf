@@ -1,19 +1,16 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.14)
 
-project(SimtTf VERSION 0.2.2 LANGUAGES CXX CUDA)
+project(SimtTf VERSION 0.3.0 LANGUAGES CXX CUDA)
 
 find_package(CUDA REQUIRED)
-find_package(OpenCV 3.4 REQUIRED)
-find_package(ZED 2.7 REQUIRED)
 
-add_library(simt_tf SHARED src/err.cu src/matrix.cu src/simt_tf.cu
-                           src/transform.cu src/vector.cu)
+add_library(simt_tf SHARED src/matrix_span.cu src/rotation_matrix.cu
+                           src/simt_tf.cu src/transform.cu src/vector3.cu
+                           src/vector4.cu)
 add_library(SimtTf::simt_tf ALIAS simt_tf)
 target_include_directories(simt_tf
     PUBLIC
         ${CUDA_INCLUDE_DIRS}
-        ${OpenCV_INCLUDE_DIRS}
-        ${ZED_INCLUDE_DIRS}
         $<INSTALL_INTERFACE:include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE
@@ -23,12 +20,8 @@ set_target_properties(simt_tf PROPERTIES CUDA_SEPARABLE_COMPILATION ON
                                          CUDA_STANDARD 14
                                          CUDA_STANDARD_REQUIRED ON
                                          CUDA_EXTENSIONS OFF)
-target_link_libraries(simt_tf
-    PUBLIC
-        ${ZED_LIBRARIES} ${OpenCV_LIBS}
-    PRIVATE
-        ${CUDA_NPP_LIBRARIES_ZED} ${CUDA_nppc_LIBRARY}
-)
+target_link_libraries(simt_tf PRIVATE ${CUDA_NPP_LIBRARIES_ZED}
+                                      ${CUDA_nppc_LIBRARY})
 
 include(GNUInstallDirs)
 set(INSTALL_CONFIGDIR ${CMAKE_INSTALL_LIBDIR}/cmake/SimtTf)
